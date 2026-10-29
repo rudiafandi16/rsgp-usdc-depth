@@ -140,3 +140,11 @@ Persistent 429s now fail fast (`log.Fatal`) instead of bisecting; archive/pruned
 RSGP-USDC 0x8e859b6cf564c4ac2b848693c85c496e81dbf6c8 (RSGP = token0 18 dec, USDC = token1, tick
 spacing 100, fee 30000, post-migration factory 0x9cb2…7a76) was deployed 2026-10-27 13:37 UTC
 (block 53159460) and first swapped 2026-10-29 14:45 UTC; use `-start 2026-10-27`.
+
+## Dune column types (2026-10-29)
+
+Dune's CSV upload infers each column's type from its values and re-renders `hour` as text
+`YYYY-MM-DDTHH:MM` (query it with `date_parse(hour, '%Y-%m-%dT%H:%i')`). Numbers used to be written
+with `strconv` 'g', which switches to e-notation at >= 1e6 / < 1e-4; Dune then typed those columns
+(e.g. xdp `quote_*`) as varchar. `f()` now writes plain decimals ('f', exact round-trip), and
+incremental runs re-format kept rows the same way, so the next upload fixes the column types.
