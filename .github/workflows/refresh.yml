@@ -1,0 +1,68 @@
+name: Refresh RSGP-USDC depth
+
+on:
+  schedule:
+    - cron: "30 2 * * *"   # daily 02:30 UTC
+  workflow_dispatch:        # manual "Run workflow" button
+
+concurrency: refresh         # never run two refreshes on the same state at once
+
+permissions:
+  contents: write           # to commit the refreshed CSV + state back to the repo
+
+env:
+  POOL: "0x8e859b6cf564c4ac2b848693c85c496e81dbf6c8"
+  QUOTE: token1
+  START: "2026-10-27"      # pool deployed 2026-10-27 13:37 UTC, first swap 2026-10-29 14:45 UTC
+  INTERVAL: "15"
+  OUT: depth_rsgp_usdc_15m.csv
+  DUNE_TABLE: rsgp_usdc_depth_15m
+  RPC: https://mainnet.base.org
+  STATE: state             # incremental checkpoint (mint/burn snapshot); delete the folder to force a full rescan
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      # Incremental: only blocks since the last run are fetched (state/ holds the checkpoint).
+      # -filter-logs: mainnet.base.org refuses eth_getLogs since ~2026-10-09 but serves
+      # eth_newFilter/eth_getFilterLogs. A persistently throttled RPC now fails fast instead of
+      # hanging until the timeout.
+      - name: Build depth CSV (retries on RPC flakiness)
+        run: |
+          set -o pipefail
+          go build -o pooldepth .
+          for attempt in 1 2 3; do
+            # progress streams to the job log (every 10th getLogs chunk); fflush so it shows live
+            if ./pooldepth -rpc "$RPC" -filter-logs -state "$STATE" -pool "$POOL" -quote "$QUOTE" \
+                           -start "$START" -linear-ts -interval "$INTERVAL" -out "$OUT" 2>&1 \
+                 | awk '!/getLogs chunk/ || (++n % 10 == 0) { print; fflush() }'; then
+              break
+            fi
+            echo "attempt $attempt failed"
+            [ "$attempt" = 3 ] && exit 1
+            sleep 60
+          done
+          wc -l "$OUT"
+          cat "$STATE/state.json"
+
+      - name: Upload to Dune (replaces the table)
+        env:
+          DUNE_API_KEY: ${{ secrets.DUNE_API_KEY }}
+        run: python3 upload_dune.py "$OUT" "$DUNE_TABLE" "RSGP-USDC 15m pool depth (auto-refreshed)"
+
+      - name: Commit refreshed CSV + state
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$OUT" "$STATE"
+          git diff --cached --quiet || git commit -m "data: refresh $OUT ($(date -u +%Y-%m-%dT%H:%MZ))"
+          git pull --rebase --quiet
+          git push
